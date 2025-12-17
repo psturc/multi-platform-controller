@@ -118,12 +118,25 @@ cert-manager:
 build-controller-image:
 	$(CONTAINER_TOOL) build -t $(CONTROLLER_IMAGE) -f Dockerfile .
 
+.PHONY: build-controller-image-instrumented
+build-controller-image-instrumented:
+	$(CONTAINER_TOOL) build --build-arg ENABLE_COVERAGE=true -t $(CONTROLLER_IMAGE) -f Dockerfile .
+
 .PHONY: build-otp-image
 build-otp-image:
 	$(CONTAINER_TOOL) build -t $(OTP_IMAGE) -f Dockerfile.otp .
 
 .PHONY: load-image
 load-image: build-controller-image build-otp-image
+	dir=$$(mktemp -d) && \
+	$(CONTAINER_TOOL) save $(CONTROLLER_IMAGE) -o $${dir}/multi-platform-controller.tar && \
+	$(CONTAINER_TOOL) save $(OTP_IMAGE) -o $${dir}/otp-server.tar && \
+	kind load image-archive -n $(KIND_CLUSTER) $${dir}/multi-platform-controller.tar && \
+	kind load image-archive -n $(KIND_CLUSTER) $${dir}/otp-server.tar && \
+	rm -r $${dir}
+
+.PHONY: load-image-instrumented
+load-image-instrumented: build-controller-image-instrumented build-otp-image
 	dir=$$(mktemp -d) && \
 	$(CONTAINER_TOOL) save $(CONTROLLER_IMAGE) -o $${dir}/multi-platform-controller.tar && \
 	$(CONTAINER_TOOL) save $(OTP_IMAGE) -o $${dir}/otp-server.tar && \

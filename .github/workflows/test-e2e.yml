@@ -115,10 +115,10 @@ jobs:
       - name: Create kind cluster
         run: kind create cluster
 
-      - name: Build and load images
+      - name: Build and load instrumented images
         run: |
           go mod tidy
-          make load-image
+          make load-image-instrumented
           podman exec kind-control-plane crictl images
 
       - name: Install dependencies
@@ -133,6 +133,79 @@ jobs:
       - name: Run Test e2e
         run: |
           make test-e2e
+
+      - name: Collect and upload e2e coverage
+        if: always()
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          echo "📋 Collecting coverage from instrumented controller using coverport-cli..."
+
+          REPO_URL="https://github.com/konflux-ci/multi-platform-controller"
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          CONTROLLER_IMAGE="quay.io/konflux-ci/multi-platform-controller:dev"
+
+          echo "Repository: ${REPO_URL}"
+          echo "Commit SHA: ${COMMIT_SHA}"
+          echo "Controller image: ${CONTROLLER_IMAGE}"
+
+          # Create directories for coverport
+          mkdir -p coverage coverport-output
+
+          # Save kubeconfig for coverport-cli to access the kind cluster
+          kind get kubeconfig --name kind > kubeconfig.yaml
+
+          # Step 1: Collect coverage from running controller pod using coverport-cli
+          echo "📋 Running coverport collect..."
+          podman run --rm \
+            --network host \
+            -v "$PWD/kubeconfig.yaml:/kubeconfig:ro,Z" \
+            -v "$PWD/coverage:/workspace/coverage:rw,Z" \
+            -e KUBECONFIG=/kubeconfig \
+            quay.io/konflux-ci/konflux-devprod/coverport-cli@sha256:bef3f7af97512649141bb273530be99f9afdebd6aaa1dfa795a0c84b5e322112 \
+            collect \
+              --label-selector=app=multi-platform-controller \
+              --namespace=multi-platform-controller \
+              --port=6060 \
+              --output=/workspace/coverage \
+              --test-name=e2e-tests \
+              --verbose || echo "⚠️ Coverage collection failed or no coverage data available"
+
+          # Check if coverage was collected
+          if [ ! -d coverage ] || [ -z "$(ls -A coverage 2>/dev/null)" ]; then
+            echo "⚠️ No coverage data collected - skipping upload"
+            exit 0
+          fi
+
+          echo "📋 Coverage files collected:"
+          find coverage -type f | head -20
+
+          # Step 2: Process and upload coverage to Codecov
+          if [ -z "$CODECOV_TOKEN" ]; then
+            echo "⚠️ CODECOV_TOKEN not set - skipping upload"
+            exit 0
+          fi
+
+          echo "📋 Running coverport process to upload to Codecov..."
+          podman run --rm \
+            -v "$PWD/coverage:/workspace/coverage:ro,Z" \
+            -v "$PWD/coverport-output:/workspace/output:rw,Z" \
+            -e CODECOV_TOKEN="${CODECOV_TOKEN}" \
+            quay.io/konflux-ci/konflux-devprod/coverport-cli@sha256:bef3f7af97512649141bb273530be99f9afdebd6aaa1dfa795a0c84b5e322112 \
+            process \
+              --coverage-dir=/workspace/coverage \
+              --format=go \
+              --codecov-flags=e2e-tests \
+              --workspace=/workspace/output \
+              --keep-workspace \
+              --verbose
+
+          UPLOAD_RESULT=$?
+          if [ $UPLOAD_RESULT -eq 0 ]; then
+            echo "✅ Coverage uploaded to Codecov successfully"
+          else
+            echo "⚠️ Coverage upload completed with exit code: $UPLOAD_RESULT"
+          fi
 
       - name: Upload E2E Debug Logs
         if: always()
